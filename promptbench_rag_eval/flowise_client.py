@@ -16,6 +16,8 @@ from typing import Any, Optional
 
 import requests
 
+from errors import is_quota_error
+
 
 class FlowiseError(RuntimeError):
     """Raised when the Flowise API returns an error or an unexpected response."""
@@ -66,7 +68,7 @@ class FlowiseClient:
                     headers=self._headers(),
                     timeout=self.timeout,
                 )
-                if response.status_code >= 400 and "limit exceeded" in response.text.lower():
+                if response.status_code >= 400 and is_quota_error(response.text):
                     raise FlowiseQuotaExceededError(
                         f"Flowise prediction quota exceeded (HTTP {response.status_code}): "
                         f"{response.text[:500]}"

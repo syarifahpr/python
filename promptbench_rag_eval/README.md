@@ -1,27 +1,44 @@
-# PromptBench RAG Evaluation for Flowise
+# PromptBench RAG Evaluation
 
-Evaluates a Flowise "prediction" API endpoint (a deployed RAG chatflow) by
-sending it a set of labeled question/answer pairs under several prompt
-phrasings, and scoring the answers with exact-match / F1 — the same idea
-behind [promptbench](https://github.com/microsoft/promptbench)'s prompt
+Evaluates a RAG chatbot's API (Flowise or Dify) by sending it a set of
+labeled question/answer pairs under several prompt phrasings, and scoring
+the answers with exact-match / F1 — the same idea behind
+[promptbench](https://github.com/microsoft/promptbench)'s prompt
 robustness evaluations, applied to a live RAG API instead of a raw LLM.
+`--provider` selects the backend; both talk to the same `eval_rag.py` /
+`eval_robustness.py` scripts and the same QA dataset format.
 
-The chatflow under test in this repo's defaults is the public chatbot at
+The chatflow originally under test in this repo's defaults is the public
+Flowise chatbot at
 https://cloud.flowiseai.com/chatbot/d8c9773e-d2f0-4045-89a3-667f2ec75559
 (a RAG assistant about sorghum/*sorgum* cultivation) — its underlying
 prediction endpoint is
 `https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559`
 (same chatflow ID, `/api/v1/prediction/` instead of `/chatbot/`), which is
-what `eval_rag.py` actually calls. `data/qa_dataset.example.csv` contains
+what `--provider flowise` calls. `data/qa_dataset.example.csv` contains
 Q&A pairs about sorghum cultivation to match.
+
+A second chat app is also supported, on [Dify](https://dify.ai), via
+`--provider dify`: https://udify.app/chat/4KeH0H4I0KUVfUJ3 — **that
+share link is Dify's human chat UI, not a callable API.** To evaluate it
+programmatically you need an API key from the Dify console (open the app
+-> "API Access"/"Akses API" -> API Key); the app is identified by that key,
+not by the udify.app URL. See `dify_client.py` for details.
 
 ## How it fits together
 
-- `flowise_client.py` — thin REST client for `POST {url}` with
+- `flowise_client.py` — thin REST client for Flowise's `POST {url}` with
   `{"question": ...}`, with retries and defensive response parsing.
-- `rag_model.py` — wraps the client as a `model(input_text) -> str`
+- `dify_client.py` — thin REST client for Dify's `POST {base_url}/chat-messages`
+  with `{"query": ..., "response_mode": "blocking", ...}` and a Bearer API
+  key, same retry behavior as the Flowise client.
+- `providers.py` — picks Flowise or Dify based on `--provider` and builds
+  the right client.
+- `rag_model.py` — wraps either client as a `model(input_text) -> str`
   callable, the same calling convention promptbench's own `LLMModel` uses,
   so promptbench's prompt/templating utilities can be reused unmodified.
+- `errors.py` — shared quota/rate-limit error detection used by both
+  clients and both eval scripts.
 - `prompts.py` — default prompt templates (each with a `{question}`
   placeholder) used to probe robustness to phrasing.
 - `metrics.py` — SQuAD-style exact-match/F1 scoring. promptbench's own
@@ -51,7 +68,8 @@ pip install autocorrect==2.6.1
 pip install -r requirements.txt
 
 cp .env.example .env
-# edit .env: set FLOWISE_API_URL (and FLOWISE_API_KEY if your chatflow requires it)
+# edit .env: set FLOWISE_API_URL (and FLOWISE_API_KEY if your chatflow requires it),
+# or DIFY_API_KEY if you're using --provider dify
 ```
 
 ## Prepare your QA dataset
@@ -74,15 +92,24 @@ actually measures agreement with the chatbot's real knowledge base.
 
 ## Run
 
+Flowise:
 ```bash
-python eval_rag.py \
+python eval_rag.py --provider flowise \
   --url https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559 \
   --dataset data/qa_dataset.example.csv \
   --output results.csv
 ```
 
-(If `FLOWISE_API_URL`/`FLOWISE_API_KEY` are set in `.env`, `--url`/`--api-key`
-can be omitted.)
+Dify (get the API key from the Dify console first — see the intro above):
+```bash
+python eval_rag.py --provider dify --api-key app-xxxxxxxx \
+  --dataset data/qa_dataset.example.csv \
+  --output results.csv
+```
+
+`--provider` defaults to `flowise`. If `FLOWISE_API_URL`/`FLOWISE_API_KEY`
+or `DIFY_API_KEY`/`DIFY_BASE_URL` are set in `.env`, `--url`/`--api-key`
+can be omitted.
 
 This prints per-prompt-template EM/F1 plus an overall average, and writes:
 
@@ -95,11 +122,12 @@ Useful flags: `--limit N` (quick smoke test on N rows), `--workers N`
 `--templates path.txt` (one custom prompt template per line, each
 containing `{question}`).
 
-If the Flowise account's prediction quota is exhausted mid-run, both
-`eval_rag.py` and `eval_robustness.py` detect the
-`"Predictions limit exceeded"` error and stop immediately (printing what
-happened and saving whatever results were already collected) instead of
-sending the remaining requests, which would all fail identically.
+If the provider's quota/rate limit is exhausted mid-run (Flowise's
+`"Predictions limit exceeded"`, Dify's HTTP 429, or anything else
+`errors.is_quota_error` recognizes), both `eval_rag.py` and
+`eval_robustness.py` stop immediately (printing what happened and saving
+whatever results were already collected) instead of sending the remaining
+requests, which would all fail identically.
 
 ## Robustness testing
 
@@ -114,19 +142,20 @@ mistakes, casing/punctuation changes — see `perturbations.py`) and measures
 how much the answer degrades.
 
 ```bash
-python eval_robustness.py \
+python eval_robustness.py --provider flowise \
   --url https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559 \
   --dataset data/qa_dataset.example.csv \
   --output robustness.csv \
   --limit 5
 ```
+(or `--provider dify --api-key app-xxxxxxxx`, same as above)
 
 For each question this sends `1 + len(attacks)` requests (clean +
 `deepwordbug` + `keyboard` + `checklist` by default — pick a subset with
 `--attacks deepwordbug,keyboard`), so quota is consumed faster than
 `eval_rag.py`; start with `--limit` on a small QA set. Defaults to
-`--sleep 1.0` between requests since Flowise Cloud's free tier has a low
-prediction quota (see "Run" above).
+`--sleep 1.0` between requests since free-tier quotas tend to be low
+(see "Run" above).
 
 It prints, per attack type:
 
@@ -146,7 +175,7 @@ question text and the answer actually returned, and
 
 ## Tests
 
-No network access needed — `requests` and the Flowise HTTP calls are
+No network access needed — `requests` and the Flowise/Dify HTTP calls are
 mocked:
 
 ```bash

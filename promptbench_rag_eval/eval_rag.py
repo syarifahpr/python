@@ -1,16 +1,24 @@
-"""Evaluate a Flowise RAG chatflow's answers against a labeled QA set,
-across several prompt phrasings, using promptbench's Prompt/InputProcess
+"""Evaluate a RAG chatbot's answers (Flowise or Dify) against a labeled QA
+set, across several prompt phrasings, using promptbench's Prompt/InputProcess
 utilities for templating and this project's own SQuAD-style EM/F1 scoring.
 
-Example:
-    python eval_rag.py \\
+Example (Flowise):
+    python eval_rag.py --provider flowise \\
         --url https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559 \\
+        --dataset data/qa_dataset.example.csv \\
+        --output results.csv
+
+Example (Dify — the udify.app/chat/<token> share link is a human chat UI,
+not an API endpoint; you need an API key from the Dify console instead,
+see providers.py/dify_client.py):
+    python eval_rag.py --provider dify --api-key app-xxxxxxxx \\
         --dataset data/qa_dataset.example.csv \\
         --output results.csv
 
 Credentials/URL can also be provided via a .env file (see .env.example):
     FLOWISE_API_URL=...
     FLOWISE_API_KEY=...
+    DIFY_API_KEY=...
 """
 from __future__ import annotations
 
@@ -38,14 +46,14 @@ except ImportError as exc:  # pragma: no cover - environment guidance only
     )
 
 from dataset import load_qa_dataset
-from flowise_client import FlowiseClient, FlowiseQuotaExceededError
+from errors import is_quota_error
 from metrics import aggregate, score_pair
 from prompts import load_templates
-from rag_model import FlowiseRAGModel
+from providers import PROVIDERS, build_model
 
 
 def run_evaluation(
-    model: FlowiseRAGModel,
+    model,
     templates: list[str],
     dataset: list[dict],
     workers: int = 1,
@@ -57,17 +65,13 @@ def run_evaluation(
         template = prompt_bank[template_idx]
         input_text = InputProcess.basic_format(template, {"question": row["question"]})
         start = time.time()
-        quota_exceeded = False
         try:
             raw_pred = model(input_text)
             error = None
-        except FlowiseQuotaExceededError as exc:
-            raw_pred = ""
-            error = str(exc)
-            quota_exceeded = True
         except Exception as exc:  # noqa: BLE001 - surfaced in the results row
             raw_pred = ""
             error = str(exc)
+        quota_exceeded = bool(error) and is_quota_error(error)
         latency = time.time() - start
         pred = OutputProcess.general(raw_pred) if raw_pred else ""
         scores = score_pair(pred, row["answer"]) if not error else {"em": 0.0, "f1": 0.0}
@@ -94,10 +98,9 @@ def run_evaluation(
             results.append(result)
             if quota_exceeded:
                 print(
-                    f"\nFlowise prediction quota exceeded after {len(results)} request(s) — "
+                    f"\nProvider quota/rate limit exceeded after {len(results)} request(s) — "
                     "stopping early instead of sending the rest, which would all fail the "
-                    "same way. Wait for the quota to reset (often daily) and re-run, or "
-                    "increase your Flowise plan's limit.",
+                    "same way. Wait for the quota to reset and re-run, or increase your plan's limit.",
                     file=sys.stderr,
                 )
                 break
@@ -159,30 +162,36 @@ def main() -> None:
     load_dotenv()
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=os.getenv("FLOWISE_API_URL"), help="Flowise prediction API URL")
-    parser.add_argument("--api-key", default=os.getenv("FLOWISE_API_KEY"), help="Flowise API key (if required)")
+    parser.add_argument("--provider", choices=PROVIDERS, default="flowise", help="Which RAG backend to call")
+    parser.add_argument(
+        "--url",
+        default=os.getenv("FLOWISE_API_URL") or os.getenv("DIFY_BASE_URL"),
+        help="Flowise prediction API URL (--provider flowise), or Dify API base URL "
+        "(--provider dify; default https://api.dify.ai/v1)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("FLOWISE_API_KEY") or os.getenv("DIFY_API_KEY"),
+        help="API key (optional for Flowise, required for Dify)",
+    )
     parser.add_argument("--dataset", default="data/qa_dataset.example.csv", help="CSV with question,answer columns")
     parser.add_argument("--templates", default=None, help="Text file with one prompt template per line")
     parser.add_argument("--output", default="results.csv", help="Where to write per-question results")
     parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows of the dataset")
-    parser.add_argument("--workers", type=int, default=1, help="Parallel requests to Flowise (default: 1)")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel requests to the provider (default: 1)")
     parser.add_argument("--sleep", type=float, default=0.0, help="Seconds to sleep between sequential requests")
     parser.add_argument("--timeout", type=float, default=60.0, help="Per-request timeout in seconds")
     args = parser.parse_args()
-
-    if not args.url:
-        sys.exit("Missing Flowise URL. Pass --url or set FLOWISE_API_URL in your environment/.env file.")
 
     dataset = load_qa_dataset(args.dataset)
     if args.limit:
         dataset = dataset[: args.limit]
     templates = load_templates(args.templates)
 
-    client = FlowiseClient(url=args.url, api_key=args.api_key, timeout=args.timeout)
-    model = FlowiseRAGModel(client)
+    model = build_model(args.provider, args.url, args.api_key, args.timeout)
 
     print(f"Evaluating {len(dataset)} question(s) x {len(templates)} prompt template(s) "
-          f"against {args.url}")
+          f"against {args.provider} ({args.url or 'default endpoint'})")
     results = run_evaluation(model, templates, dataset, workers=args.workers, sleep=args.sleep)
     summary = summarize(results)
     print_summary(summary)

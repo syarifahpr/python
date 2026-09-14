@@ -1,21 +1,28 @@
-"""Measure robustness of a Flowise RAG chatflow: for each question, perturb
-it with small, meaning-preserving noise (typos, casing/punctuation changes)
-and see how much the chatbot's answer degrades compared to the clean
-question — the same idea behind promptbench's adversarial prompt attacks
-(TextFooler/TextBugger/DeepWordBug/CheckList/...), reimplemented without
-promptbench's TextAttack-based `prompt_attack` module since that targets
-classification tasks with discrete labels, not free-text RAG answers.
-See perturbations.py for details on each perturbation type.
+"""Measure robustness of a RAG chatbot (Flowise or Dify): for each question,
+perturb it with small, meaning-preserving noise (typos, casing/punctuation
+changes) and see how much the chatbot's answer degrades compared to the
+clean question — the same idea behind promptbench's adversarial prompt
+attacks (TextFooler/TextBugger/DeepWordBug/CheckList/...), reimplemented
+without promptbench's TextAttack-based `prompt_attack` module since that
+targets classification tasks with discrete labels, not free-text RAG
+answers. See perturbations.py for details on each perturbation type.
 
-Example:
-    python eval_robustness.py \\
+Example (Flowise):
+    python eval_robustness.py --provider flowise \\
         --url https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559 \\
+        --dataset data/qa_dataset.example.csv \\
+        --output robustness.csv
+
+Example (Dify — needs an API key from the Dify console, not the
+udify.app/chat/<token> share link; see providers.py/dify_client.py):
+    python eval_robustness.py --provider dify --api-key app-xxxxxxxx \\
         --dataset data/qa_dataset.example.csv \\
         --output robustness.csv
 
 Credentials/URL can also be provided via a .env file (see .env.example):
     FLOWISE_API_URL=...
     FLOWISE_API_KEY=...
+    DIFY_API_KEY=...
 """
 from __future__ import annotations
 
@@ -42,13 +49,13 @@ except ImportError as exc:  # pragma: no cover - environment guidance only
     )
 
 from dataset import load_qa_dataset
-from flowise_client import FlowiseClient, FlowiseQuotaExceededError
+from errors import is_quota_error
 from metrics import f1_score, score_pair
 from perturbations import PERTURBATIONS
-from rag_model import FlowiseRAGModel
+from providers import PROVIDERS, build_model
 
 
-def query(model: FlowiseRAGModel, text: str) -> tuple[str, str | None]:
+def query(model, text: str) -> tuple[str, str | None]:
     """Call the model and return (cleaned_answer, error)."""
     try:
         raw = model(text)
@@ -58,7 +65,7 @@ def query(model: FlowiseRAGModel, text: str) -> tuple[str, str | None]:
 
 
 def run_robustness_eval(
-    model: FlowiseRAGModel,
+    model,
     dataset: list[dict],
     attack_names: list[str],
     sleep: float = 0.0,
@@ -84,11 +91,11 @@ def run_robustness_eval(
         if sleep:
             time.sleep(sleep)
 
-        if clean_error and isinstance(clean_error, str) and "quota" in clean_error.lower():
+        if clean_error and is_quota_error(clean_error):
             print(
-                f"\nFlowise prediction quota exceeded after {len(results)} request(s) — "
-                "stopping early. Wait for the quota to reset (often daily) and re-run, "
-                "or increase your Flowise plan's limit.",
+                f"\nProvider quota/rate limit exceeded after {len(results)} request(s) — "
+                "stopping early. Wait for the quota to reset and re-run, or increase your "
+                "plan's limit.",
                 file=sys.stderr,
             )
             return results
@@ -111,11 +118,11 @@ def run_robustness_eval(
             if sleep:
                 time.sleep(sleep)
 
-            if error and isinstance(error, str) and "quota" in error.lower():
+            if error and is_quota_error(error):
                 print(
-                    f"\nFlowise prediction quota exceeded after {len(results)} request(s) — "
-                    "stopping early. Wait for the quota to reset (often daily) and re-run, "
-                    "or increase your Flowise plan's limit.",
+                    f"\nProvider quota/rate limit exceeded after {len(results)} request(s) — "
+                    "stopping early. Wait for the quota to reset and re-run, or increase your "
+                    "plan's limit.",
                     file=sys.stderr,
                 )
                 return results
@@ -179,8 +186,18 @@ def main() -> None:
     load_dotenv()
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=os.getenv("FLOWISE_API_URL"), help="Flowise prediction API URL")
-    parser.add_argument("--api-key", default=os.getenv("FLOWISE_API_KEY"), help="Flowise API key (if required)")
+    parser.add_argument("--provider", choices=PROVIDERS, default="flowise", help="Which RAG backend to call")
+    parser.add_argument(
+        "--url",
+        default=os.getenv("FLOWISE_API_URL") or os.getenv("DIFY_BASE_URL"),
+        help="Flowise prediction API URL (--provider flowise), or Dify API base URL "
+        "(--provider dify; default https://api.dify.ai/v1)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("FLOWISE_API_KEY") or os.getenv("DIFY_API_KEY"),
+        help="API key (optional for Flowise, required for Dify)",
+    )
     parser.add_argument("--dataset", default="data/qa_dataset.example.csv", help="CSV with question,answer columns")
     parser.add_argument("--output", default="robustness.csv", help="Where to write per-question results")
     parser.add_argument("--limit", type=int, default=None, help="Only evaluate the first N rows of the dataset")
@@ -192,9 +209,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible perturbations")
     args = parser.parse_args()
 
-    if not args.url:
-        sys.exit("Missing Flowise URL. Pass --url or set FLOWISE_API_URL in your environment/.env file.")
-
     attack_names = [a.strip() for a in args.attacks.split(",") if a.strip()]
     unknown = [a for a in attack_names if a not in PERTURBATIONS]
     if unknown:
@@ -204,13 +218,12 @@ def main() -> None:
     if args.limit:
         dataset = dataset[: args.limit]
 
-    client = FlowiseClient(url=args.url, api_key=args.api_key, timeout=args.timeout)
-    model = FlowiseRAGModel(client)
+    model = build_model(args.provider, args.url, args.api_key, args.timeout)
 
     total_requests = len(dataset) * (1 + len(attack_names))
     print(
         f"Evaluating {len(dataset)} question(s) x (1 clean + {len(attack_names)} attack(s)) "
-        f"= {total_requests} request(s) against {args.url}"
+        f"= {total_requests} request(s) against {args.provider} ({args.url or 'default endpoint'})"
     )
     results = run_robustness_eval(model, dataset, attack_names, sleep=args.sleep, seed=args.seed)
     summary = summarize(results)
