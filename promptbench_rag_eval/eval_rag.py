@@ -37,22 +37,11 @@ except ImportError as exc:  # pragma: no cover - environment guidance only
         f"(original error: {exc})"
     )
 
-from flowise_client import FlowiseClient
+from dataset import load_qa_dataset
+from flowise_client import FlowiseClient, FlowiseQuotaExceededError
 from metrics import aggregate, score_pair
 from prompts import load_templates
 from rag_model import FlowiseRAGModel
-
-
-def load_qa_dataset(path: str) -> list[dict]:
-    with open(path, "r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    if not rows:
-        raise ValueError(f"No rows found in dataset: {path}")
-    for row in rows:
-        if "question" not in row or "answer" not in row:
-            raise ValueError("Dataset CSV must have 'question' and 'answer' columns")
-    return rows
 
 
 def run_evaluation(
@@ -63,22 +52,26 @@ def run_evaluation(
     sleep: float = 0.0,
 ) -> list[dict]:
     prompt_bank = Prompt(templates)
-    results: list[dict] = []
 
-    def evaluate_one(template_idx: int, row: dict) -> dict:
+    def evaluate_one(template_idx: int, row: dict) -> tuple[dict, bool]:
         template = prompt_bank[template_idx]
         input_text = InputProcess.basic_format(template, {"question": row["question"]})
         start = time.time()
+        quota_exceeded = False
         try:
             raw_pred = model(input_text)
             error = None
+        except FlowiseQuotaExceededError as exc:
+            raw_pred = ""
+            error = str(exc)
+            quota_exceeded = True
         except Exception as exc:  # noqa: BLE001 - surfaced in the results row
             raw_pred = ""
             error = str(exc)
         latency = time.time() - start
         pred = OutputProcess.general(raw_pred) if raw_pred else ""
         scores = score_pair(pred, row["answer"]) if not error else {"em": 0.0, "f1": 0.0}
-        return {
+        result = {
             "template_idx": template_idx,
             "template": template,
             "question": row["question"],
@@ -90,17 +83,29 @@ def run_evaluation(
             "latency_s": round(latency, 3),
             "error": error,
         }
+        return result, quota_exceeded
 
     jobs = [(t_idx, row) for t_idx in range(len(prompt_bank)) for row in dataset]
 
     if workers <= 1:
+        results: list[dict] = []
         for t_idx, row in jobs:
-            results.append(evaluate_one(t_idx, row))
+            result, quota_exceeded = evaluate_one(t_idx, row)
+            results.append(result)
+            if quota_exceeded:
+                print(
+                    f"\nFlowise prediction quota exceeded after {len(results)} request(s) — "
+                    "stopping early instead of sending the rest, which would all fail the "
+                    "same way. Wait for the quota to reset (often daily) and re-run, or "
+                    "increase your Flowise plan's limit.",
+                    file=sys.stderr,
+                )
+                break
             if sleep:
                 time.sleep(sleep)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            results = list(pool.map(lambda job: evaluate_one(*job), jobs))
+            results = [r for r, _ in pool.map(lambda job: evaluate_one(*job), jobs)]
 
     return results
 

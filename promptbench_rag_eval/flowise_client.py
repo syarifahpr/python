@@ -21,6 +21,16 @@ class FlowiseError(RuntimeError):
     """Raised when the Flowise API returns an error or an unexpected response."""
 
 
+class FlowiseQuotaExceededError(FlowiseError):
+    """Raised when the Flowise account's prediction quota is exhausted.
+
+    Retrying does not help here (the quota won't refill mid-run), so this is
+    raised immediately without going through the retry loop, letting callers
+    stop the whole evaluation early instead of burning through every
+    remaining request only to have each one fail the same way.
+    """
+
+
 @dataclass
 class FlowiseClient:
     url: str
@@ -56,6 +66,11 @@ class FlowiseClient:
                     headers=self._headers(),
                     timeout=self.timeout,
                 )
+                if response.status_code >= 400 and "limit exceeded" in response.text.lower():
+                    raise FlowiseQuotaExceededError(
+                        f"Flowise prediction quota exceeded (HTTP {response.status_code}): "
+                        f"{response.text[:500]}"
+                    )
                 if response.status_code >= 500 and attempt < self.max_retries:
                     time.sleep(self.retry_backoff * attempt)
                     continue

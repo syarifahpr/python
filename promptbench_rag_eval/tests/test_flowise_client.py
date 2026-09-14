@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from flowise_client import FlowiseClient, FlowiseError
+from flowise_client import FlowiseClient, FlowiseError, FlowiseQuotaExceededError
 
 
 def _mock_response(status_code=200, json_data=None, text=""):
@@ -54,3 +54,19 @@ def test_predict_retries_on_5xx_then_succeeds():
     responses = [_mock_response(status_code=500), _mock_response(json_data={"text": "recovered"})]
     with patch("flowise_client.requests.post", side_effect=responses):
         assert client.predict("hi") == "recovered"
+
+
+def test_predict_raises_quota_exceeded_without_retrying():
+    client = FlowiseClient(url="https://example.com/api/v1/prediction/abc", max_retries=3, retry_backoff=0)
+    quota_body = '{"statusCode":500,"success":false,"message":"Error: predictionsServices.buildChatflow - Predictions limit exceeded"}'
+    with patch(
+        "flowise_client.requests.post",
+        return_value=_mock_response(status_code=500, text=quota_body),
+    ) as post:
+        try:
+            client.predict("hi")
+            assert False, "expected FlowiseQuotaExceededError"
+        except FlowiseQuotaExceededError as exc:
+            assert "limit exceeded" in str(exc).lower()
+    # no retries: quota exhaustion won't resolve itself mid-run
+    assert post.call_count == 1

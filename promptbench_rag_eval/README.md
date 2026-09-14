@@ -32,6 +32,12 @@ Q&A pairs about sorghum cultivation to match.
 - `eval_rag.py` — CLI that ties it together, using promptbench's
   `Prompt` and `InputProcess.basic_format`/`OutputProcess.general` for
   templating/cleanup.
+- `perturbations.py` / `eval_robustness.py` — a second evaluation mode that
+  measures robustness to small, meaning-preserving noise in the question
+  (typos, casing/punctuation changes), rather than to different prompt
+  phrasings. See "Robustness testing" below.
+- `dataset.py` — shared CSV loader used by both `eval_rag.py` and
+  `eval_robustness.py`.
 
 ## Setup
 
@@ -88,6 +94,55 @@ Useful flags: `--limit N` (quick smoke test on N rows), `--workers N`
 (parallel requests), `--sleep S` (throttle sequential requests),
 `--templates path.txt` (one custom prompt template per line, each
 containing `{question}`).
+
+If the Flowise account's prediction quota is exhausted mid-run, both
+`eval_rag.py` and `eval_robustness.py` detect the
+`"Predictions limit exceeded"` error and stop immediately (printing what
+happened and saving whatever results were already collected) instead of
+sending the remaining requests, which would all fail identically.
+
+## Robustness testing
+
+promptbench's own adversarial attacks (TextFooler, TextBugger, DeepWordBug,
+BERTAttack, CheckList, StressTest, in `promptbench.prompt_attack`) are
+built on the `textattack` library and target classification tasks with a
+fixed label set — their "goal function" needs a discrete label to flip,
+which doesn't apply to a RAG chatbot's free-text answers. `eval_robustness.py`
+implements the same underlying idea directly: for each question it sends
+the clean version plus a few perturbed versions (small typos, keyboard
+mistakes, casing/punctuation changes — see `perturbations.py`) and measures
+how much the answer degrades.
+
+```bash
+python eval_robustness.py \
+  --url https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559 \
+  --dataset data/qa_dataset.example.csv \
+  --output robustness.csv \
+  --limit 5
+```
+
+For each question this sends `1 + len(attacks)` requests (clean +
+`deepwordbug` + `keyboard` + `checklist` by default — pick a subset with
+`--attacks deepwordbug,keyboard`), so quota is consumed faster than
+`eval_rag.py`; start with `--limit` on a small QA set. Defaults to
+`--sleep 1.0` between requests since Flowise Cloud's free tier has a low
+prediction quota (see "Run" above).
+
+It prints, per attack type:
+
+- `avg_f1` — average EM/F1-style word-overlap score against the ground
+  truth answer for that attack's perturbed questions.
+- `f1_drop_vs_clean` — how much lower that is than the clean-question
+  baseline. Higher means the chatbot is more sensitive to that kind of
+  noise (less robust).
+- `avg_answer_stability_vs_clean` — word overlap between the perturbed
+  answer and the clean answer for the *same* question, regardless of
+  correctness. Lower means the chatbot's response itself changed more,
+  even if both answers happened to be equally right or wrong.
+
+`robustness.csv` has one row per (question, attack) with the perturbed
+question text and the answer actually returned, and
+`robustness.summary.json` has the aggregated stats above.
 
 ## Tests
 
