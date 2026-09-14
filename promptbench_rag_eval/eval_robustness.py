@@ -52,7 +52,7 @@ from dataset import load_qa_dataset
 from errors import is_quota_error
 from metrics import f1_score, score_pair
 from perturbations import PERTURBATIONS
-from providers import PROVIDERS, build_model
+from providers import PROVIDERS, build_model, env_defaults
 
 
 def query(model, text: str) -> tuple[str, str | None]:
@@ -189,14 +189,16 @@ def main() -> None:
     parser.add_argument("--provider", choices=PROVIDERS, default="flowise", help="Which RAG backend to call")
     parser.add_argument(
         "--url",
-        default=os.getenv("FLOWISE_API_URL") or os.getenv("DIFY_BASE_URL"),
+        default=None,
         help="Flowise prediction API URL (--provider flowise), or Dify API base URL "
-        "(--provider dify; default https://api.dify.ai/v1)",
+        "(--provider dify; default https://api.dify.ai/v1). Falls back to "
+        "FLOWISE_API_URL/DIFY_BASE_URL for the selected --provider if omitted.",
     )
     parser.add_argument(
         "--api-key",
-        default=os.getenv("FLOWISE_API_KEY") or os.getenv("DIFY_API_KEY"),
-        help="API key (optional for Flowise, required for Dify)",
+        default=None,
+        help="API key (optional for Flowise, required for Dify). Falls back to "
+        "FLOWISE_API_KEY/DIFY_API_KEY for the selected --provider if omitted.",
     )
     parser.add_argument("--dataset", default="data/qa_dataset.example.csv", help="CSV with question,answer columns")
     parser.add_argument("--output", default="robustness.csv", help="Where to write per-question results")
@@ -208,6 +210,10 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=60.0, help="Per-request timeout in seconds")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducible perturbations")
     args = parser.parse_args()
+
+    env_url, env_api_key = env_defaults(args.provider)
+    args.url = args.url or env_url
+    args.api_key = args.api_key or env_api_key
 
     attack_names = [a.strip() for a in args.attacks.split(",") if a.strip()]
     unknown = [a for a in attack_names if a not in PERTURBATIONS]

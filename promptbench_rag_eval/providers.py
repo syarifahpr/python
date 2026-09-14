@@ -4,6 +4,7 @@ know about each client's construction details.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 from dify_client import DifyClient
@@ -11,6 +12,21 @@ from flowise_client import FlowiseClient
 from rag_model import DifyRAGModel, FlowiseRAGModel
 
 PROVIDERS = ("flowise", "dify")
+
+
+def env_defaults(provider: str) -> tuple[str | None, str | None]:
+    """(url, api_key) from environment variables for the given provider.
+
+    Kept provider-specific (rather than a single "FLOWISE_API_URL or
+    DIFY_BASE_URL" fallback) so selecting --provider dify while
+    FLOWISE_API_URL happens to be set in .env doesn't silently point Dify
+    requests at the Flowise URL.
+    """
+    if provider == "flowise":
+        return os.getenv("FLOWISE_API_URL"), os.getenv("FLOWISE_API_KEY")
+    if provider == "dify":
+        return os.getenv("DIFY_BASE_URL"), os.getenv("DIFY_API_KEY")
+    return None, None
 
 
 def build_model(provider: str, url: str | None, api_key: str | None, timeout: float):
