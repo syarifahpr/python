@@ -6,6 +6,15 @@ phrasings, and scoring the answers with exact-match / F1 — the same idea
 behind [promptbench](https://github.com/microsoft/promptbench)'s prompt
 robustness evaluations, applied to a live RAG API instead of a raw LLM.
 
+The chatflow under test in this repo's defaults is the public chatbot at
+https://cloud.flowiseai.com/chatbot/d8c9773e-d2f0-4045-89a3-667f2ec75559
+(a RAG assistant about sorghum/*sorgum* cultivation) — its underlying
+prediction endpoint is
+`https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559`
+(same chatflow ID, `/api/v1/prediction/` instead of `/chatbot/`), which is
+what `eval_rag.py` actually calls. `data/qa_dataset.example.csv` contains
+Q&A pairs about sorghum cultivation to match.
+
 ## How it fits together
 
 - `flowise_client.py` — thin REST client for `POST {url}` with
@@ -52,6 +61,10 @@ What is our refund policy?,Refunds are issued within 14 days of purchase.
 promptbench's built-in datasets (SQuAD, GLUE, etc.) are generic public
 benchmarks — they won't reflect a Flowise chatflow's actual knowledge base,
 so this tool is designed around your own domain-specific Q&A pairs instead.
+The bundled `data/qa_dataset.example.csv` already has 20 sorghum-cultivation
+Q&A pairs for the chatbot linked above; if that chatflow's source documents
+say something different, update the `answer` column to match them so EM/F1
+actually measures agreement with the chatbot's real knowledge base.
 
 ## Run
 
