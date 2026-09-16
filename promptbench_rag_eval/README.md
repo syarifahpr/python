@@ -8,6 +8,10 @@ robustness evaluations, applied to a live RAG API instead of a raw LLM.
 `--provider` selects the backend; both talk to the same `eval_rag.py` /
 `eval_robustness.py` scripts and the same QA dataset format.
 
+A third script, `eval_deepchecks.py`, adds a complementary check using
+[deepchecks](https://github.com/deepchecks/deepchecks)' NLP module — see
+"Text-quality checks with deepchecks" below.
+
 The chatflow originally under test in this repo's defaults is the public
 Flowise chatbot at
 https://cloud.flowiseai.com/chatbot/d8c9773e-d2f0-4045-89a3-667f2ec75559
@@ -53,8 +57,13 @@ not by the udify.app URL. See `dify_client.py` for details.
   measures robustness to small, meaning-preserving noise in the question
   (typos, casing/punctuation changes), rather than to different prompt
   phrasings. See "Robustness testing" below.
-- `dataset.py` — shared CSV loader used by both `eval_rag.py` and
-  `eval_robustness.py`.
+- `dataset.py` — shared CSV loader used by `eval_rag.py`, `eval_robustness.py`,
+  and `eval_deepchecks.py`.
+- `eval_deepchecks.py` — a third evaluation mode using deepchecks' NLP
+  checks instead of EM/F1, for text-quality/integrity issues EM/F1 doesn't
+  catch (duplicate/canned answers, garbled output, property drift). See
+  "Text-quality checks with deepchecks" below. Deliberately does not import
+  promptbench (see that section for why).
 
 ## Setup
 
@@ -172,6 +181,79 @@ It prints, per attack type:
 `robustness.csv` has one row per (question, attack) with the perturbed
 question text and the answer actually returned, and
 `robustness.summary.json` has the aggregated stats above.
+
+## Text-quality checks with deepchecks
+
+EM/F1 (above) only tells you whether an answer matches the expected
+ground truth. It won't catch a chatbot that returns the same canned
+fallback ("I don't know") for many different questions, garbled/encoding-broken
+output, or answers whose overall character start drifting once the input
+is slightly perturbed. [deepchecks](https://github.com/deepchecks/deepchecks)'
+NLP module has checks built specifically for that, so `eval_deepchecks.py`
+collects the chatbot's answers the same way `eval_rag.py` does and runs them
+through:
+
+- `TextDuplicates` — flags when too many answers are near-duplicates of
+  each other (a common RAG failure mode: the same fallback/boilerplate
+  response for unrelated questions).
+- `SpecialCharacters` — flags answers with an abnormal amount of special
+  characters (garbled/encoding-broken output).
+- `FrequentSubstrings` — flags repeated boilerplate substrings across
+  answers.
+- `TextPropertyOutliers` — flags answers that are statistical outliers on
+  properties like length, so unusually short/long/off answers stand out.
+- With `--compare-attack`, also runs `TrainTestSamplesMix` and
+  `PropertyDrift` comparing the clean-question answers against answers to
+  a perturbed version of each question (see "Robustness testing" above),
+  to catch cases where perturbing the question causes a qualitatively
+  different kind of answer (not just a lower EM/F1 score).
+
+This is a different dependency stack from `eval_rag.py`/`eval_robustness.py`
+and deliberately does not import promptbench: promptbench's own answer
+cleanup (`OutputProcess.general`) lowercases and strips punctuation, which
+is fine for EM/F1 matching but would corrupt the text deepchecks is meant
+to inspect. Install it separately:
+
+```bash
+pip install -r requirements-deepchecks.txt
+```
+
+`requirements-deepchecks.txt` pins `scikit-learn`/`category-encoders` to
+versions that actually work with `deepchecks==0.19.1` — that package
+doesn't cap either itself, so a plain `pip install deepchecks[nlp]` can
+resolve versions of both that break deepchecks' own imports.
+
+```bash
+python eval_deepchecks.py --provider flowise \
+  --url https://cloud.flowiseai.com/api/v1/prediction/d8c9773e-d2f0-4045-89a3-667f2ec75559 \
+  --dataset data/qa_dataset.example.csv \
+  --output deepchecks_report.html
+```
+
+(or `--provider dify --api-key app-xxxxxxxx`, same as above). Add
+`--compare-attack deepwordbug` (or `keyboard`/`checklist`) to also collect
+perturbed-question answers and run the drift comparison.
+
+This prints each check's condition result (PASS/WARN/FAIL) and writes:
+
+- `deepchecks_report.html` — the full interactive deepchecks report (open
+  it in a browser).
+- `deepchecks_report.csv` — the raw answers collected, with EM/F1 for
+  reference.
+- `deepchecks_report.summary.json` — the same PASS/WARN/FAIL conditions
+  printed to the console, as JSON.
+- With `--compare-attack`, also `deepchecks_report.compare-<attack>.html`
+  and `.compare-<attack>.csv` for the perturbed-answer comparison.
+
+**First-run model download:** the property-based checks (`TextPropertyOutliers`,
+`PropertyDrift`) call deepchecks' `TextData.calculate_builtin_properties()`,
+which unconditionally downloads a ~130MB fastText language-ID model from
+`dl.fbaipublicfiles.com` the first time it runs (cached afterwards) and
+requires the `fasttext` package (included in `requirements-deepchecks.txt`,
+but it needs a C++ compiler to build). If you're offline, don't have
+`fasttext`, or don't want the download, pass `--skip-properties` — you
+still get the duplicate/special-character/frequent-substrings/samples-mix
+checks, just not the property-based ones.
 
 ## Tests
 
