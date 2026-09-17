@@ -1,0 +1,16 @@
+# For eval_deepchecks.py. Kept separate from requirements.txt since deepchecks
+# pulls a large, independent dependency stack unrelated to promptbench.
+#
+# deepchecks 0.19.1 doesn't cap scikit-learn or category-encoders, so pip
+# happily resolves versions that are actually incompatible with it
+# (scikit-learn>=1.5 breaks deepchecks' own scorer setup; category-encoders
+# >=2.7 requires scikit-learn>=1.6, which contradicts that). These pins are
+# a known-working combination — install this file as-is rather than adding
+# deepchecks to requirements.txt directly.
+deepchecks[nlp]==0.19.1
+scikit-learn<1.5
+category-encoders<2.7
+fasttext
+pandas
+python-dotenv
+requests
