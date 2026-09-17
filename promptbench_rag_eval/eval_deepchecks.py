@@ -281,7 +281,7 @@ def main() -> None:
 
     suite = build_single_dataset_suite(properties_ok)
     suite_result = suite.run(clean_td)
-    suite_result.save_as_html(str(out))
+    suite_result.save_as_html(str(out), as_widget=False)
     print(f"\nSaved deepchecks report to {out}")
     conditions = summarize_suite_result(suite_result)
     print_condition_summary("Chatbot answer quality", conditions)
@@ -299,7 +299,7 @@ def main() -> None:
         compare_suite = build_train_test_suite(properties_ok and perturbed_properties_ok)
         compare_result = compare_suite.run(train_dataset=clean_td, test_dataset=perturbed_td)
         compare_out = out.with_name(f"{out.stem}.compare-{args.compare_attack}{out.suffix}")
-        compare_result.save_as_html(str(compare_out))
+        compare_result.save_as_html(str(compare_out), as_widget=False)
         print(f"Saved drift comparison report to {compare_out}")
         compare_conditions = summarize_suite_result(compare_result)
         print_condition_summary(f"Clean vs. '{args.compare_attack}' drift", compare_conditions)
